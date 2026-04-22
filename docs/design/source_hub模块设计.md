@@ -7,12 +7,12 @@
 从能力边界上，`source_hub` 内部分为两条主链路：
 
 - `skill`：查询、详情、包下载
-- `mcp`：查询、详情、配置拉取、连通性测试
+- `mcp`：查询、详情、配置拉取、测试能力
 
 ### 1.1 目标
 
 - 提供统一的 `skill` 查询和包下载能力。
-- 提供统一的 `mcp` 查询、配置拉取和连通性测试能力。
+- 提供统一的 `mcp` 查询、配置拉取和测试能力。
 - 屏蔽不同来源系统的接口差异，输出统一模型。
 - 为后续接入业界来源和其他内部来源保留扩展点。
 
@@ -23,7 +23,7 @@
 - 查询 `skill`、`mcp` 列表与详情。
 - 下载指定版本 `skill` 包。
 - 拉取统一后的 `mcp` 配置。
-- 对候选远端 `MCP` 执行连通性验证。
+- 对候选 `MCP` 执行测试。
 
 本模块不负责：
 
@@ -50,10 +50,9 @@ SourceHubFacade
     +-- SkillPackageService
     +-- MCPQueryService
     +-- MCPConfigService
-    +-- MCPConnectivityService
+    +-- MCPTestService
             |
-            +-- ParameterResolver
-            +-- RemoteMCPVerifier
+            +-- MCP Testing Package
     |
     +-- ProviderRegistry
             |
@@ -67,7 +66,7 @@ SourceHubFacade
 - 门面层：对上暴露统一入口。
 - 资源服务层：按 `skill`、`mcp` 拆分能力编排。
 - Provider 层：封装不同来源系统的接口调用和字段映射。
-- 验证层：封装与来源无关的远端 `MCP` 测试逻辑。
+- 测试层：封装与来源无关的 `MCP` 测试逻辑。
 
 ### 2.2 多来源扩展
 
@@ -76,7 +75,7 @@ SourceHubFacade
 - `skill` 和 `mcp` 在服务层分开设计，互不混用流程。
 - 每个来源系统使用独立 Provider 实现，不共享来源侧 DTO。
 - 服务层只依赖统一抽象，不依赖具体来源实现。
-- 测试层只消费统一后的 `mcp` 端点模型，不直接读取来源原始响应。
+- 测试层只消费统一后的 `MCP profile` 模型，不直接读取来源原始响应。
 
 建议保留两类 Provider 抽象：
 
@@ -90,7 +89,7 @@ class SkillSourceProvider(Protocol):
     async def get_skill_detail(self, request: GetSkillDetailRequest) -> SkillDetail:
         ...
 
-    async def download_skill_package(self, request: DownloadSkillPackageRequest) -> SkillPackagePayload:
+    async def get_skill_download_link(self, request: GetSkillDownloadLinkRequest) -> SkillDownloadLink:
         ...
 
 
@@ -106,6 +105,35 @@ class MCPSourceProvider(Protocol):
     async def pull_mcp_config(self, request: PullMCPConfigRequest) -> MCPConfigTemplate:
         ...
 ```
+
+### 2.3 与群组配置和客户端配置的关系
+
+结合现有后端原始设计，群组配置和用户配置最终都落在 `config: json` 中。`source_hub` 不直接保存这份配置，但需要为配置管理模块提供可持久化的候选结构。
+
+建议按三层对象理解：
+
+- 候选项
+  `source_hub` 返回给管理员选择的 `SkillSummary`、`SkillDetail`、`MCPSummary`、`MCPDetail`、`MCPProfile`
+- 群组持久化配置
+  配置管理模块根据管理员选择结果，将 `skill`、`mcp` 配置项写入群组 `config`
+- 客户端运行配置
+  配置加载流程基于群组 `config` 生成客户端最终可消费的 `skill` 引用和 `mcpServers` 运行配置
+
+建议群组 `config` 顶层结构如下：
+
+```json
+{
+  "schemaVersion": 1,
+  "skills": [],
+  "mcps": []
+}
+```
+
+其中：
+
+- `skills` 保存选中的 `skill` 引用
+- `mcps` 保存选中的 `mcp` 来源、profile 和参数值
+- 客户端最终运行配置不直接等于群组持久化配置，而是在配置加载阶段生成
 
 ## 3. 代码组织与文件结构设计
 
@@ -130,13 +158,11 @@ src/scaffolding_backend/source_hub/
 │   └── package_service.py              # skill 包下载能力编排
 ├── mcp/
 │   ├── __init__.py                     # mcp 资源能力包
-│   ├── contracts.py                    # mcp 对外契约
-│   ├── models.py                       # mcp 与端点统一模型
+│   ├── contracts.py                    # mcp 查询与配置拉取对外契约
+│   ├── models.py                       # mcp 与 profile 统一模型
 │   ├── query_service.py                # mcp 查询能力编排
 │   ├── config_service.py               # mcp 配置拉取能力编排
-│   ├── connectivity_service.py         # mcp 连通性测试能力编排
-│   ├── parameter_resolver.py           # mcp 参数替换与模板解析
-│   └── remote_mcp_verifier.py          # 远端 MCP 连通性验证
+│   └── testing/                        # mcp 测试能力包，具体结构见独立测试设计文档
 └── providers/
     ├── __init__.py                     # 来源 Provider 包
     ├── base.py                         # Provider 抽象接口定义
@@ -163,7 +189,7 @@ classDiagram
     class SkillPackageService
     class MCPQueryService
     class MCPConfigService
-    class MCPConnectivityService
+    class MCPTestService
     class ProviderRegistry
     class SkillSourceProvider
     class MCPSourceProvider
@@ -173,23 +199,21 @@ classDiagram
     class CompanyAuth
     class SkillMappers
     class MCPMappers
-    class ParameterResolver
-    class RemoteMCPVerifier
+    class MCPTestingPackage
 
     SourceHubFacade --> SkillQueryService : calls
     SourceHubFacade --> SkillPackageService : calls
     SourceHubFacade --> MCPQueryService : calls
     SourceHubFacade --> MCPConfigService : calls
-    SourceHubFacade --> MCPConnectivityService : calls
+    SourceHubFacade --> MCPTestService : calls
 
     SkillQueryService --> ProviderRegistry : lookup provider
     SkillPackageService --> ProviderRegistry : lookup provider
     MCPQueryService --> ProviderRegistry : lookup provider
     MCPConfigService --> ProviderRegistry : lookup provider
-    MCPConnectivityService --> ProviderRegistry : lookup provider
+    MCPTestService --> ProviderRegistry : lookup provider
 
-    MCPConnectivityService --> ParameterResolver : resolve params
-    MCPConnectivityService --> RemoteMCPVerifier : verify endpoint
+    MCPTestService --> MCPTestingPackage : test profile
 
     ProviderRegistry --> SkillSourceProvider : returns
     ProviderRegistry --> MCPSourceProvider : returns
@@ -217,7 +241,7 @@ class SourceHubFacade:
     async def get_skill_detail(self, request: GetSkillDetailRequest) -> SkillDetail:
         ...
 
-    async def download_skill_package(self, request: DownloadSkillPackageRequest) -> SkillPackagePayload:
+    async def get_skill_download_link(self, request: GetSkillDownloadLinkRequest) -> SkillDownloadLink:
         ...
 
     async def list_mcps(self, request: ListMCPsRequest) -> PageResult[MCPSummary]:
@@ -229,7 +253,7 @@ class SourceHubFacade:
     async def pull_mcp_config(self, request: PullMCPConfigRequest) -> MCPConfigTemplate:
         ...
 
-    async def test_remote_mcp(self, request: TestRemoteMCPRequest) -> ConnectivityTestResult:
+    async def test_mcp_profile(self, request: TestMCPProfileRequest) -> MCPTestResult:
         ...
 ```
 
@@ -326,7 +350,6 @@ sequenceDiagram
 
 - `content`
 - `archive_url`
-- `raw_ref`
 
 关键字段映射：
 
@@ -339,15 +362,15 @@ sequenceDiagram
 | `content` | `content` |
 | `archive_url` | `archiveUrl` |
 
-### 4.2 Skill 包下载能力
+### 4.2 Skill 包临时下载链接能力
 
 #### 4.2.1 下载边界
 
-`download_skill_package` 用于补齐 `skill` 的最终使用闭环。配置管理模块在配置加载流程中调用该能力，从市场下载完整的 `skill` 包，供客户端后续加载和使用。
+`get_skill_download_link` 用于补齐 `skill` 的最终使用闭环。配置管理模块在配置加载流程中调用该能力，为客户端按需获取指定版本 `skill` 包的临时下载地址。`source_hub` 不直接代理包内容，而是返回来源侧生成的临时下载链接。
 
-#### 4.2.2 `download_skill_package`
+#### 4.2.2 `get_skill_download_link`
 
-依赖上游接口：`skills/v1/download`
+依赖上游接口：`skills/link/v1/get`
 
 ```mermaid
 sequenceDiagram
@@ -356,12 +379,12 @@ sequenceDiagram
     participant Provider as 公司 Skill Provider
     participant Upstream as 公司目标系统
 
-    Caller->>Hub: download_skill_package(request)
-    Hub->>Provider: download_skill_package(request)
-    Provider->>Upstream: POST skills/v1/download
-    Upstream-->>Provider: file stream
-    Provider-->>Hub: file stream
-    Hub-->>Caller: file stream
+    Caller->>Hub: get_skill_download_link(request)
+    Hub->>Provider: get_skill_download_link(request)
+    Provider->>Upstream: GET skills/link/v1/get
+    Upstream-->>Provider: downloadUrl
+    Provider-->>Hub: SkillDownloadLink
+    Hub-->>Caller: SkillDownloadLink
 ```
 
 关键字段引用范围：
@@ -369,7 +392,7 @@ sequenceDiagram
 | 类型 | 字段 |
 | --- | --- |
 | 请求 | `skillId`、`version` |
-| 响应 | 文件流 |
+| 响应 | `data.downloadUrl` |
 
 #### 4.2.3 请求与返回
 
@@ -379,15 +402,58 @@ sequenceDiagram
 - `skill_id`
 - `version`
 
-返回结果直接对应上游下载接口的文件流。
+建议返回结果如下：
+
+```python
+class SkillDownloadLink:
+    download_url: str
+```
+
+其中 `download_url` 直接对应上游接口返回的 `data.downloadUrl`。
 
 #### 4.2.4 作用说明
 
 - 配置管理模块在配置加载流程中按需调用该能力。
-- `source_hub` 当前版本直接代理上游 `skills/v1/download`。
-- 返回结果为完整 `skill` 包内容，供客户端后续使用。
+- `source_hub` 当前版本直接代理上游 `skills/link/v1/get`。
+- 返回结果为临时下载链接，供客户端后续下载完整 `skill` 包。
+- 临时下载链接不进入群组持久化配置，仅在加载或同步流程中按需获取。
 
-#### 4.2.5 错误处理
+#### 4.2.5 群组配置项建议
+
+对于 `skill`，建议群组 `config.skills` 中只保存来源引用，不保存详情内容和下载地址。
+
+建议的持久化结构如下：
+
+```python
+class SkillConfigEntry:
+    id: str
+    enabled: bool
+    source_ref: SkillSourceRef
+
+
+class SkillSourceRef:
+    source_code: str
+    skill_id: str
+    version: str
+```
+
+示例：
+
+```json
+{
+  "id": "skill:company:excel-skill@1.0.3",
+  "enabled": true,
+  "sourceRef": {
+    "sourceCode": "company",
+    "skillId": "excel-skill",
+    "version": "1.0.3"
+  }
+}
+```
+
+配置加载阶段，客户端基于 `sourceRef` 判断本地是否已有对应版本；若不存在，则由配置管理模块调用 `get_skill_download_link` 获取临时下载地址，客户端再下载完整 `skill` 包。
+
+#### 4.2.6 错误处理
 
 建议统一错误分类：
 
@@ -493,7 +559,6 @@ sequenceDiagram
 - `content`
 - `demands`
 - `profiles`
-- `raw_ref`
 
 关键字段映射：
 
@@ -573,6 +638,8 @@ class MCPProfile:
     prestart_command: str | None
 ```
 
+其中 `mcp_server_config` 表示标准化后的客户端 `mcpServers` 运行配置片段，不直接暴露来源侧原始配置结构。配置加载阶段基于 `MCPProfile` 与管理员填写的参数，生成客户端最终可消费的 `mcpServers` 配置。
+
 #### 5.2.4 Profile 抽取规则
 
 来源侧 `mcp` 详情中，统一按运行配置 profile 抽取：
@@ -580,7 +647,7 @@ class MCPProfile:
 - `config.remoteList` 中的每个对象抽取为一个 profile。
 - 若不存在 `remoteList` 但存在 `remote`，则用 `remote` 构建单个 profile。
 - `config.npx`、`config.uvx`、`config.docker` 分别抽取为本地运行 profile。
-- profile 中的 `mcp_server_config` 统一来自对应节点下的 `config.mcpServers`。
+- profile 中的 `mcp_server_config` 统一来自对应节点下的 `config.mcpServers`，并在抽取阶段整理为标准化后的客户端运行配置片段。
 
 当前版本建议按以下规则识别 profile 类型：
 
@@ -588,121 +655,112 @@ class MCPProfile:
 - 包含 `command/args/env` 的本地运行配置，识别为 `mode=local`
 - `remote` 配置中同时包含 `url/type` 和 `command` 的场景，识别为 `mode=bootstrap_remote`
 
+三类 profile 的 `mcp_server_config` 建议分别满足以下最小约束：
+
+- `remote`
+  包含最终连接所需的 `url`、`type`、`headers`、`timeout`
+- `local`
+  包含最终启动所需的 `command`、`args`、`env`、`timeout`
+- `bootstrap_remote`
+  `mcp_server_config` 包含最终连接所需的 `url`、`type`、`headers`、`timeout`，`prestart_command` 表示启动前置步骤
+
 #### 5.2.5 Profile 应用说明
 
 对调用方而言，`profiles` 表示同一个 `MCP` 在当前版本下可供客户端使用的不同运行方式：
 
-- `remote`：客户端可直接按 URL 连接
-- `local`：客户端按 `command/args/env` 启动本地 `MCP`
-- `bootstrap_remote`：客户端需先执行预启动命令，再通过远端 URL 连接
+- `remote`：客户端可直接按 `mcp_server_config` 中的连接配置访问
+- `local`：客户端按 `mcp_server_config` 中的 `command/args/env` 启动本地 `MCP`
+- `bootstrap_remote`：客户端先执行 `prestart_command`，再按 `mcp_server_config` 中的连接配置访问
 
-`mcpServers` 字段在三类 profile 中都表示客户端最终消费的运行配置片段，不只是安装信息：
+`mcp_server_config` 在三类 profile 中都表示客户端最终消费的 `mcpServers` 运行配置片段，不只是安装信息：
 
-- 远端 profile 中，`mcpServers` 主要提供 `url/type/headers`
-- 本地 profile 中，`mcpServers` 主要提供 `command/args/env`
-- `bootstrap_remote` profile 中，`mcpServers` 提供最终连接 URL，而 `prestart_command` 提供预启动能力
+- 远端 profile 中，`mcp_server_config` 主要提供 `url/type/headers/timeout`
+- 本地 profile 中，`mcp_server_config` 主要提供 `command/args/env/timeout`
+- `bootstrap_remote` profile 中，`mcp_server_config` 提供最终连接配置，而 `prestart_command` 提供预启动能力
 
-### 5.3 MCP 连通性测试能力
+#### 5.2.6 群组配置项建议
 
-#### 5.3.1 当前测试范围
+对于 `mcp`，建议群组 `config.mcps` 中保存来源引用、选中的 profile 以及管理员填写的参数值，不直接保存完整 `mcpServers` 运行配置。
 
-本模块当前仅支持一种测试能力：
-
-- `mode=remote` 的远端 `MCP` 服务连通性验证
-
-#### 5.3.2 `test_remote_mcp`
-
-依赖上游接口：复用 `mcps/{manifestId}/detail`
-
-```mermaid
-sequenceDiagram
-    participant Caller as 上层业务模块
-    participant Hub as source_hub
-    participant Provider as 公司 MCP Provider
-    participant Upstream as 公司目标系统
-
-    Caller->>Hub: test_remote_mcp(request)
-    Hub->>Provider: pull_mcp_config(request)
-    Provider->>Upstream: GET mcps/{manifestId}/detail
-    Upstream-->>Provider: MCP 详情响应
-    Provider-->>Hub: MCPConfigTemplate
-    Hub->>Hub: 参数解析与连通性验证
-    Hub-->>Caller: ConnectivityTestResult
-```
-
-测试链路内部优先复用 `pull_mcp_config` 的结果，不直接在测试层处理来源侧原始 DTO。
-
-#### 5.3.3 测试请求
+建议的持久化结构如下：
 
 ```python
-class TestRemoteMCPRequest:
+class MCPConfigEntry:
+    id: str
+    enabled: bool
+    source_ref: MCPSourceRef
+    selection: MCPProfileSelection
+    parameter_values: dict[str, str]
+    test_summary: MCPTestSummary | None
+
+
+class MCPSourceRef:
     source_code: str
     manifest_id: str
     publisher_id: str
-    version: str | None
-    profile_name: str | None
-    parameter_values: dict[str, str]
+    version: str
+
+
+class MCPProfileSelection:
+    profile_name: str
+    mode: Literal["remote", "local", "bootstrap_remote"]
+    launcher: Literal["remote", "npx", "uvx", "docker", "custom"] | None
+
+
+class MCPTestSummary:
+    connectivity_ok: bool
+    supports_prompt_list: bool | None
 ```
 
-#### 5.3.4 参数解析
+示例：
 
-`parameter_resolver.py` 负责处理如下逻辑：
-
-- 合并来源默认值与调用方输入值
-- 校验必填参数是否齐全
-- 对 `url_template`、`headers_template` 中的 `{{PARAM}}` 占位符进行替换
-- 对敏感参数执行日志脱敏
-
-#### 5.3.5 连通性验证分层
-
-远端 `MCP` 测试分为四层：
-
-1. 输入校验  
-   校验 profile 是否存在、`mode` 是否为 `remote`、URL 格式是否正确。
-
-2. 地址可达性校验  
-   校验目标地址是否可连接，超时是否合理。
-
-3. MCP 协议初始化  
-   与远端服务建立 MCP 会话，完成 `initialize`。
-
-4. 工具列表探测  
-   尝试获取工具列表，确认服务可正常提供能力。
-
-#### 5.3.6 Unsupported 场景
-
-以下场景直接返回 `UNSUPPORTED`：
-
-- profile 不存在
-- profile 的 `mode` 不为 `remote`
-- profile 的 `transport` 不属于 `sse`、`streamable-http`
-
-#### 5.3.7 结果模型
-
-```python
-class ConnectivityTestResult:
-    success: bool
-    status: str
-    phase: str
-    profile_name: str | None
-    resolved_url: str | None
-    latency_ms: int | None
-    tool_count: int | None
-    message: str
-    diagnostics: dict[str, Any]
+```json
+{
+  "id": "mcp:company:excel-mcp-server@1.1.2:excel-local",
+  "enabled": true,
+  "sourceRef": {
+    "sourceCode": "company",
+    "manifestId": "excel-mcp-server",
+    "publisherId": "1",
+    "version": "1.1.2"
+  },
+  "selection": {
+    "profileName": "excel-local",
+    "mode": "local",
+    "launcher": "uvx"
+  },
+  "parameterValues": {
+    "USER_PORT": "8000"
+  },
+  "testSummary": {
+    "connectivityOk": true,
+    "supportsPromptList": false
+  }
+}
 ```
 
-#### 5.3.8 错误处理
+其中 `testSummary` 为可选字段。若管理员未执行测试，配置管理模块仍可保存该 `MCP` 配置项。
 
-建议统一错误分类：
+#### 5.2.7 与客户端运行配置的关系
 
-- `UnsupportedTestTargetError`
-- `TestParameterMissingError`
-- `TestParameterResolveError`
-- `TestConnectTimeoutError`
-- `TestConnectFailedError`
-- `TestProtocolInitError`
-- `TestToolsListError`
+群组 `config.mcps` 保存的是管理员选择结果，不是客户端最终运行态配置。
+
+配置加载阶段应基于 `MCPConfigEntry` 重新生成客户端可消费的运行配置：
+
+- `remote`
+  生成 `url`、`type`、`headers`、`timeout`
+- `local`
+  生成 `command`、`args`、`env`、`timeout`
+- `bootstrap_remote`
+  生成 `prestart_command` 以及最终连接所需的 `url`、`type`、`headers`
+
+客户端最终消费的仍然是 `mcpServers` 运行配置，而不是群组持久化结构本身。
+
+### 5.3 MCP 测试能力
+
+`source_hub` 对 `MCP` 提供统一测试入口，测试对象为 `5.2` 中抽取出的 profile，测试结果供后续配置生成和能力判断使用。
+
+测试能力的目标、模式划分、执行流程、结果模型和扩展安排已单独整理在 [source_hub-MCP测试能力设计](./source_hub-MCP测试能力设计.md)。
 
 ## 6. 后续扩展建议
 
@@ -710,7 +768,7 @@ class ConnectivityTestResult:
 
 - 新来源系统 Provider 扩展
 - `skill` 包下载缓存或分发能力扩展
-- `mcp` 本地运行配置支持扩展
+- `mcp` 本地/混合型测试能力扩展
 - 统一缓存层扩展
 - 查询结果排序和筛选字段扩展
 - 测试结果审计记录扩展
@@ -720,4 +778,4 @@ class ConnectivityTestResult:
 - 结构上支持多来源，但只落地公司目标系统 Provider
 - `skill` 与 `mcp` 在服务层彻底拆开
 - `skill` 只做查询与包下载，不承担安装职责
-- `mcp` 只做查询、配置拉取和远端测试，不在后端执行本地命令型安装或启动逻辑
+- `mcp` 只做查询、配置拉取和测试，测试详细方案单独维护
